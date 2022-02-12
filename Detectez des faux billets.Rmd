@@ -1,0 +1,715 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*.
+
+## Importation des librairies
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(corrplot)
+library(scales)
+library(FactoMineR)
+library(factoextra)
+library(ggplot2)
+library(reshape2)
+library(purrr)
+library(caret)
+library(naniar)
+library(logistf)
+library(glmnet)
+library(plyr)
+```
+
+```{r setup, include=FALSE}
+# Affectation de l'espace de travail
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/Thibaut/Google Drive/Data Analyse/OpenClassRoom - Projets/Projet 6")
+getwd()
+```
+
+```{r}
+# Chargement de la base de données notes.csv
+billets <- read.table("data/notes.csv",header=TRUE, sep=",")
+```
+
+```{r}
+# Conversion de la colonne "is_genuine" en valeur booléenne
+billets$is_genuine <- as.logical(billets$is_genuine)
+```
+
+```{r}
+# Identification des valeurs manquantes
+billets[!complete.cases(billets),]
+```
+
+# Partie 0 (Analyse)
+
+```{r}
+# Taille du dataframe
+dim(billets)
+```
+
+```{r}
+# Analyse univariée
+summary(billets)
+```
+
+Parmi les 170 billets que comporte notre échantillon, 100 sont authentiques et 70 sont contrefaits.
+
+```{r}
+# Analyse bivariée de l'authenticité des billets selon la taille du bord inférieur
+boxplot(billets$margin_low ~ billets$is_genuine)
+```
+
+Les faux billets se distinguent nettement des vrais billets sur l'écart moyen du bord inférieur. Néanmoins, on remarque qu'une partie des résultats se chevauchent puisqu'un quart des faux billets ont un bord inférieur dont la taille s'étale sur des dimensions comparables aux bords des vrais billets.
+
+```{r}
+# Analyse bivariée de l'authenticité selon l'écart à la marge supérieure
+boxplot(billets$margin_up ~ billets$is_genuine)
+```
+
+Sur les bords inférieurs également, on constate une taille moyenne bien supérieure du côté des faux billets. Toutefois, les dimensions relevées se chevauchent encore davantage sur cette partie des billets.
+
+```{r}
+# Analyse bivariée de l'authenticité selon la longueur des billets
+boxplot(billets$length ~ billets$is_genuine)
+```
+
+```{r}
+# Boxplots pour chaque variable et chaque condition d'authenticité
+# Source: https://stackoverflow.com/questions/14604439/plot-multiple-boxplot-in-one-graph
+billets_melt <- melt(billets, id.var="is_genuine")
+p <- ggplot(data=billets_melt, aes(x=variable, y=value))+
+  geom_boxplot(aes(fill=is_genuine))
+
+
+# Division du graphique en plusieurs panneaux
+p + facet_wrap( ~ variable, scales="free") + labs(title = "Amplitude des variables selon l'authenticité des billets") + theme(plot.title = element_text(color = '#3876C2', size=20, face='bold', hjust = 0.5)) + ggsave("graphiques/graphique01_caracteristiques_billets.jpg", width = 16, height = 9)
+```
+
+Corrélations
+
+```{r}
+# Conversion numérique des valeurs booléennes de la colonne "is_genuine" sur une copie du dataframe
+# True=1 et False=0
+billets_num <- billets
+billets_num$is_genuine <- as.numeric(billets_num[,1])
+head(billets_num)
+```
+
+```{r}
+# Matrice de corrélations
+billets_cor <- cor(billets_num, method ="pearson")
+
+billets_cor
+```
+
+```{r}
+# Tableau de corrélation en heatmap
+png(height=600, width=600, file="graphiques/graphique03_heatmap.png", type = "cairo")
+corrplot(billets_cor, type="upper", tl.col="black", tl.srt=60, tl.pos = "lt")
+```
+
+Corrélation avec l'authenticité des billets:
+
+-   Corrélation très faible avec la diagonale
+
+-   Les hauteurs (gauche et droite) des billets ne sont que partiellement corrélées
+
+-   Les bords supérieurs, la différence entre les billets vrais et faux est assez significative
+
+-   La longueur des billets et leur marge inférieure semblent bien corrélées avec l'authenticité des billets
+
+#### Analyse de la variance (ANOVA)
+
+```{r}
+diagonal_anova <- aov(diagonal ~ is_genuine, billets)
+summary(diagonal_anova)
+```
+
+L'anova révèle une p-valeur de 0.07. A un niveau de test de 5%, la variable "diagonal" varie donc peu selon que le billet est authentique ou non.
+
+```{r}
+height_left_anova <- aov(height_left ~ is_genuine, billets)
+summary(height_left_anova)
+```
+
+```{r}
+height_right_anova <- aov(height_right ~ is_genuine, billets)
+summary(height_right_anova)
+```
+
+```{r}
+margin_low_anova <- aov(margin_low ~ is_genuine, billets)
+summary(margin_low_anova)
+```
+
+```{r}
+margin_up_anova <- aov(margin_up ~ is_genuine, billets)
+summary(margin_up_anova)
+```
+
+```{r}
+length_anova <- aov(length ~ is_genuine, billets)
+summary(length_anova)
+```
+
+Sur le reste de variables, l'anova montre qu'à un niveau de test de 5% l'authenticité des billets engendre une modification substantielle des valeurs.![](C:/Users/Thibaut/AppData/Local/RStudio/tmp/paste-7DC52C31.png)
+
+# Partie 1
+
+### ACP
+
+```{r}
+res.pca=PCA(billets[,2:7], scale.unit=TRUE, ncp=5, graph=TRUE, axes=c(1,2))
+res.pca
+```
+
+```{r}
+# Éboulis des valeurs propres.
+eigenvalues <- res.pca$eig
+barplot(eigenvalues[, 2], names.arg=1:nrow(eigenvalues),
+        col = rgb(0.8,0.1,0.1,0.6), 
+        main = "Eboulis des valeurs propres",
+        col.main = "blue",
+        xlab = "Principal Components",
+        ylab = "Percentage of variances")
+lines(x = 1:nrow(eigenvalues), eigenvalues[, 2], 
+      type="b", pch=19, col = "red")
+
+```
+
+Le critère du coude dans l'éboulis nous invite à retenir les deux premiers axes, qui retiennent en tout 69,4% de l'inertie expliquée. En d'autres termes, près de 70% de la variabilité totale du nuage des individus est représenté par un plan en deux dimensions.
+
+```{r}
+# Contribution des variables à la 1e Dimension
+fviz_contrib(res.pca, fill = rgb(0.8,0.1,0.1,0.6), 
+             color = rgb(0.8,0.1,0.1,0.6),
+             choice="var", axes = 1 )
+```
+
+Les variables de la hauteur, de la longueur et de la marge inférieure des billets contribuent de manière substantielle à la 1e Dimension de l'ACP.
+
+```{r}
+# Description de la dimension
+res.desc <- dimdesc(res.pca, axes =c(1,2), proba = 0.05)
+
+# Description de la dimension 1
+res.desc$Dim.1
+```
+
+```{r}
+# Contribution des variables à la 2e Dimension
+fviz_contrib(res.pca, fill = rgb(0.8,0.1,0.1,0.6),
+             color = rgb(0.8,0.1,0.1,0.6), 
+             choice="var", axes = 2 )
+```
+
+La 2e Dimension est nettement associée à la diagonale des billets, variable pourtant très peu corrélée avec l'authenticité des billets.
+
+```{r}
+# Graphique des variables
+var <- get_pca_var(res.pca)
+
+# Visualisation du cos2 des variables et qualité de la représentation
+png(height=600, width=600, file="graphiques/graphique05_qualite_rep_variables.png", type = "cairo")
+corrplot(var$cos2, 
+         is.corr=FALSE, 
+         main="Qualité de représentation des variables selon les dimensions", 
+         mar=c(3,0,3,0)
+         )
+```
+
+Le tableau des couleurs montre qu'une majorité des variables est représentée dans la 1e dimension de notre ACP. Deux variables restent néanmoins sous-représentées: la diagonale et le bord supérieur qui sont mieux estimés respectivement dans les dimensions 2 et 3.
+
+```{r}
+# Contribution aux composantes principales
+png(height=600, width=600, file="graphiques/graphique06_contrib_var_compos.png", type = "cairo")
+corrplot(var$contrib, 
+         is.corr=FALSE,
+         main="Contribution des variables aux composantes principales",
+         mar=c(3,0,3,0)
+         )
+```
+
+```{r}
+# Carte factorielle - ACP sur les dimensions 1 & 2
+fviz_pca_var(res.pca, col.var="cos2",
+            gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+            title="ACP sur les dimensions 1 et 2"
+            )
+```
+
+L'ACP sur les dimensions 1 et 2 montre la proximité entre les hauteurs gauches et droites d'une part et les marges inférieures et supérieures d'autre part, qui pourraient ainsi être regroupées pour former deux variables uniques.
+
+```{r}
+# Carte factorielle - ACP sur les dimensions 1 & 3
+fviz_pca_var(res.pca, 
+             col.var="cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             title="ACP sur les dimensions 1 et 3", 
+             axes=c(1,3)
+             )
+```
+
+La variable "diagonale" est mal représentée sur ce plan. Nous remarquons également que les marges inférieures et supérieures n'ont plus la même proximité. Enfin, ce cercle confirme la forte corrélation entre la hauteur droite et la hauteur gauche.
+
+```{r}
+# Carte factorielle - ACP sur les dimensions 1 et 2 avec l'authenticité des billets comme variable illustrative
+res.pca.quanti = PCA(billets_num, scale.unit = TRUE, ncp=5, quanti.sup = 1, graph=TRUE)
+
+fviz_pca_var(res.pca.quanti, 
+             col.var="cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             title="ACP sur les dimensions 1 et 2 avec l'authenticité des billets comme illustration")
+```
+
+```{r}
+# Carte factorielle - ACP sur les dimensions 1 et 3 avec l'authenticité des billets comme variable illustrative
+res.pca.quanti = PCA(billets_num, scale.unit = TRUE, ncp=5, quanti.sup = 1, graph=TRUE)
+
+fviz_pca_var(res.pca.quanti, 
+             col.var="cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             title="ACP sur les dimensions 1 et 3 avec l'authenticité des billets comme illustration",
+             axes=c(1,3)
+            )
+```
+
+Les deux plans factoriels présentent une corrélation entre la variable d'authenticité et la longueur des billets. Le cercle de corrélation représentant les dimensions 1 et 2 confirme la corrélation négative entre cette authenticité et les variables des bords.
+
+Cette représentation factorielle confirme que les variables "longueur", "bord inférieur" et "bord supérieur" permettent une détection plus précise des faux billets.
+
+```{r}
+# Représentation par ellipses des billets sur plan factoriel selon leur authenticité
+fviz_pca_ind(res.pca,
+             label="Genuineness", habillage=billets$is_genuine,
+             addEllipses=TRUE, ellipse.level=0.90, axes=c(1,2),
+             title="Représentation des billets vrais et faux sur les dimensions 1 et 2")
+```
+
+Sur ce plan en deux dimensions, la représentation graphique en ellipses distingue assez nettement deux groupes de billets. Hormis deux billets authentiques positionnés dans l'ellipse qui regroupe les billets dont les caractéristiques suggèrent une contrefaçon, ce plan des dimensions 1 et 2 semble relativement bien permettre la distinction entre les vrais billets et les faux billets.
+
+```{r}
+# Représentation par ellipses des billets selon leur authenticité sur les dimensions 1 et 3
+fviz_pca_ind(res.pca,
+             label="Genuineness", habillage=billets$is_genuine,
+             addEllipses=TRUE, ellipse.level=0.90, axes=c(1,3),
+             title="Représentation des billets vrais et faux sur les dimensions 1 et 3")
+```
+
+Prenant en considération les dimensions 1 et 3, ce plan factoriel montre un relatif chevauchement des vrais et faux billets. La dimension 3 semble donc en mesure de déterminer l'authenticité des billets avec une précision moindre que la dimension 2.
+
+Nous savons que la variable la mieux représentée dans la dimension 2 est la diagonale des billets. L'ACP nous a montré que cette variable présentait des résultats décorrélés de la longueur et des bords des billets. Nous pourrions donc en déduire que la diagonale des billets constitue un facteur permettant de distinguer les vrais des faux billets. L'analyse bivariée portant sur la diagonale a pourtant montré que le critère d'authenticité n'entraînait pas une forte modification des valeurs de la diagonale des billets. Nous savons toutefois que la diagonale peut varier selon la hauteur et la longueur des billets, et comme l'ACP a montré que la longueur constituait un des principaux critères de détection des billets contrefaits. Nous pouvons conclure que les faux billets compensent les variations de longueur par une modification de la hauteur, ce qui impacte par la même occasion la diagonale.
+
+```{r}
+# Qualité de représentation et de contribution des individus
+fviz_pca_ind (res.pca,
+              axes=c(1,2),
+              col.ind = "cos2",
+              alpha.ind = "contrib",
+              label="Genuineness",
+              gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+              title="Qualité de représentation et de  contribution des individus"
+              )
+```
+
+Le graphique montre que les billets situés sur la partie centrale du plan factoriel ont une plus faible qualité de représentation et de contribution que les billets situés plus en marge sur les dimensions 1 et 2.
+
+# Partie 2
+
+```{r}
+# Mise à l'échelle des données (centrage et réduction)
+scaled_billets <- as.data.frame(scale(billets[,2:7], center=T, scale=T))
+head(scaled_billets)
+```
+
+```{r}
+#ACP sur les données brutes et les données centrées réduites
+res.pca <- PCA(billets[,2:7], scale.unit=TRUE, ncp=5, graph=TRUE)
+nonscaled.res.pca <- PCA(billets[,2:7], scale.unit=FALSE, ncp=5, graph=TRUE)
+```
+
+```{r}
+# HCPC sur les données brutes et les données centrées réduites
+res.hcpc <- HCPC(res.pca, nb.clust = 2, graph = FALSE)
+nonscaled.res.hcpc <- HCPC(nonscaled.res.pca, nb.clust = 2, graph = FALSE)
+```
+
+```{r}
+# Visualisation des individus par groupes colorés sur les données centrées et réduites
+fviz_cluster(res.hcpc,
+             repel = TRUE,
+             show.clust.cent = TRUE,
+             palette = "jco",
+             ggtheme = theme_minimal(),
+             main = "Carte factorielle d'une classification hiérarchique sur les données centrées et réduites"
+             )
+```
+
+```{r}
+# Visualisation des individus par groupes colorés sur les données centrées et réduites
+fviz_cluster(nonscaled.res.hcpc,
+             repel = TRUE,        
+             show.clust.cent = TRUE, 
+             palette = "jco",         
+             ggtheme = theme_minimal(),
+             main = "Carte factorielle d'une classification hiérarchique sur les données brutes"
+             )
+```
+
+```{r}
+# Restrictions et préparation des données pour la jointure
+billets_clust <- res.hcpc$data.clust
+billets_clust <- billets_clust %>%
+  select(clust)
+
+nonscaled.billets_clust <- nonscaled.res.hcpc$data.clust
+nonscaled.billets_clust <- nonscaled.billets_clust %>%
+  select(clust)
+```
+
+### K-Means
+
+```{r}
+#K-Means sur les valeurs centrées réduites
+set.seed(42)
+kmeans_billets <- kmeans(scaled_billets, centers=2, nstart = 1)
+kmeans_billets
+```
+
+La méthode des K-means distingue 2 clusters dont les effectifs respectifs sont de 93 et 77 billets
+
+```{r}
+#K-Means sur les valeurs brutes
+set.seed(42)
+kmeans_nonscaled_billets <- kmeans(billets_num[,2:7], centers=2, nstart = 1)
+kmeans_nonscaled_billets
+```
+
+A ce stade, nous ne savons pas encore si la méthode des K-means repère mieux les billets authentiques et contrefaits en se basant sur les données brutes ou les données centrées-réduites, mais les données brutes donne une répartition (69/101) plus proche de la répartition de notre échantillon d'origine (70/100) que les données centrées-réduites (77/93).
+
+```{r}
+# Assignation des valeurs du clustering au dataframe principal
+billets_clust$klust <- factor(kmeans_billets$cluster)
+billets_clust
+```
+
+```{r}
+# Assignation des valeurs du clustering des données brutes au dataframe principal
+nonscaled.billets_clust$klust <- factor(kmeans_nonscaled_billets$cluster)
+nonscaled.billets_clust
+```
+
+```{r}
+# Jointures avec le dataframe principal
+billets_clust <- merge(billets_clust, billets_num, by.x = 0, by.y = 0, all.x = TRUE, all.y = TRUE)
+
+nonscaled.billets_clust <- merge(nonscaled.billets_clust, billets_num, by.x = 0, by.y = 0, all.x = TRUE, all.y = TRUE)
+```
+
+```{r}
+# Restriction aux colonnes de prédiction (selon les méthodes HCPC et K-means) et à la variable d'authenticité numérique
+billets_clust <- billets_clust %>%
+  select(is_genuine, clust, klust)
+
+nonscaled.billets_clust <- nonscaled.billets_clust %>%
+  select(is_genuine, clust, klust)
+```
+
+#### Clustering et visualisation selon la méthode des K-means
+
+```{r}
+# Clustering K-means
+res.km <- kmeans(scaled_billets, 2, nstart=25)
+
+# Clustering K-means des valeurs brutes
+nonscaled.res.km <- kmeans(billets_num, 2, nstart=25)
+```
+
+```{r}
+# Visualisation des clusters dans un plan à 2 dimensions
+fviz_cluster(res.km, data = billets_num,
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800"), 
+             geom = "point",
+             ellipse.type = "norm", 
+             habillage=billets$is_genuine,
+             ggtheme = theme_bw(),
+             main = "Partitionnement en k-moyennes des données centrées-réduites dans un plan à 2 dimensions"
+             )
+```
+
+```{r}
+# Visualisation des clusters des données brutes dans un plan à 2 dimensions
+fviz_cluster(nonscaled.res.km, data = billets_num,
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800"), 
+             geom = "point",
+             ellipse.type = "norm", 
+             habillage=billets$is_genuine,
+             ggtheme = theme_bw(),
+             main = "Partitionnement en k-moyennes des données brutes dans un plan à 2 dimensions"
+             )
+```
+
+### Matrices de confusion
+
+#### Matrices de confusion sur les données centrées et réduites
+
+```{r}
+# Matrice de confusion avec les clusters issus d'une classification hiérarchique
+MC_hcpc = table(billets_clust$clust, billets_clust$is_genuine)
+MC_hcpc
+```
+
+En colonne, le 0 désigne les billets dont on sait qu'ils sont faux, tandis que le 1 liste les billets authentiques. En ligne, le 1 indique que les billets détectés comme vrais, et le 2 désignent ceux qui ont été désignés faux par notre modèle.
+
+Sur 100 billets authentiques, 92 d'entre eux ont été correctement désignés. Le taux de vrais positifs ("rappel" ou "sensibilité") est donc de 92%, avec une précision d'environ 99% (92 sont positifs parmi les 93 que notre modèle a jugé positifs). La F-mesure est de 0.48.
+
+Concernant les faux billets, la spécificité s'élève à 98.5%. 69 billets ont été détectés comme étant faux sur les 70 faux billets que contient notre échantillon. La précision est cependant plus faible (89.6%) car 8 billets jugés faux sont en fait authentiques. La F-mesure est alors de 0.47.
+
+```{r}
+# Matrice de confusion dont le clustering est issu de la méthode des K-means
+MC_kmeans = table(billets_clust$klust, billets_clust$is_genuine)
+MC_kmeans
+```
+
+D'après la matrice de confusion, la méthode des K-means apporte exactement les mêmes résultats que le HCPC sur les données centrées et réduites.
+
+#### Matrices de confusion sur les données brutes
+
+```{r}
+# Matrice de confusion avec les clusters issus d'une classification hiérarchique
+MC_hcpc = table(nonscaled.billets_clust$clust, nonscaled.billets_clust$is_genuine)
+MC_hcpc
+
+
+```
+
+La matrice de confusion montre que la détection des billets est globalement plus efficace en se basant sur les données brutes. En effet, la sensibilité des billets authentiques s'élève à 99% avec une précision d'environ 98%. La F-mesure est de 0.49.
+
+Concernant les faux billets, la spécificité est de 97% (68 des 70 faux billets sont identifiés comme contrefaits) avec une précision de 98.5% (sur les 69 billets jugés faux, 68 sont contrefaits). La F-mesure est ici de 0.49.
+
+Elle récolte la combinaison de spécificités et de sensibilités la plus élevée.
+
+```{r}
+# Matrice de confusion dont le clustering est issu de la méthode des K-means
+MC_kmeans = table(nonscaled.billets_clust$klust, nonscaled.billets_clust$is_genuine)
+MC_kmeans
+```
+
+La méthode des K-means présente les mêmes résultats que la précédente méthode avec les données brutes. La clusterisation a en effet provoqué une inversion des valeurs par rapport aux précédents résultats. L'intitulé n°1 en colonne correspond aux billets jugés faux par notre méthode de détection tandis que le libellé 2 en colonne correspond aux livres désignés comme étant authentiques.
+
+Est-il pour autant plus intéressant de réaliser ces méthodes en se basant sur les données brutes? Si l'objectif de l'exercice est de détecter les billets faux, on remarque que la spécificité sur les billets contrefaits est finalement plus élevée sur les données centrées-réduites (98,5%) que sur les données brutes (97%).
+
+## Régression logistique à variables multiples
+
+```{r}
+# Régression de la variable d'authenticité en fonction des autres variables
+reg_multi <- lm(is_genuine~., data=billets_num)
+summary(reg_multi)
+```
+
+Le R² est de 0.88, et nous constatons que la p-valeur est inférieure à 5% sur les variables que nous avons déjà désignées comme étant les plus significatives: marvin_low, margin_up et length. La diagonale, avec une p-valeur de 72% est particulièrement peu significative.
+
+En suivant la méthode 'backward', nous allons retirer cette dernière variable peu significative pour effectuer une régression linéaire sur le reste des variables.
+
+```{r}
+# Régression de la variable d'authenticité en fonction des variables de l'échantillon, mais sans la diagonale
+reg_multi <- lm(is_genuine~height_left+height_right+margin_low+margin_up+length, data=billets_num)
+summary(reg_multi)
+```
+
+La hauteur gauche obtient une p-valeur de 20% et paraît encore peu significative. Nous allons donc la retirer de notre régression linéaire.
+
+```{r}
+# Régression de la variable d'authenticité en fonction des autres variables
+reg_multi <- lm(is_genuine~height_right+margin_low+margin_up+length, data=billets_num)
+summary(reg_multi)
+```
+
+La hauteur droite montre également des éléments de non-significativité. En l'excluant de notre régression, cela donne:
+
+```{r}
+# Régression de la variable d'authenticité en fonction des autres variables
+reg_multi <- lm(is_genuine~margin_low+margin_up+length, data=billets_num)
+summary(reg_multi)
+```
+
+Toutes les variables restantes ont une p-valeur inférieure à 5% et semblent constituer un critère significatif. Elles contribuent à 88% de la variance (R²).
+
+# Partie 3
+
+### Subdivision apprentissage / test
+
+```{r}
+# Indexation des billets en apprentissage
+set.seed(42)
+trainIndex <- createDataPartition(billets$is_genuine, p=0.7,list=F)
+
+print(length(trainIndex))
+```
+
+```{r}
+# Partition du data frame des billets en apprentissage
+billetsTrain <- billets[trainIndex,]
+dim(billetsTrain)
+```
+
+```{r}
+# Partition du data frame des billets en test
+billetsTest <- billets[-trainIndex,]
+dim(billetsTest)
+```
+
+```{r}
+# Distribution de l'authenticité dans l'échantillon d'apprentissage
+prop.table(table(billetsTrain$is_genuine))
+```
+
+```{r}
+# Distribution de l'authenticité dans l'échantillon test
+prop.table(table(billetsTest$is_genuine))
+```
+
+Nous remarquons que la distribution des billets vrais et faux est la même dans l'échantillon test et l'échantillon d'apprentissage.
+
+#### Modélisation par validation croisée sur toutes les variables
+
+```{r}
+# Paramètre du processus d'apprentissage
+fitControl <- trainControl(method="cv",number=10)
+```
+
+```{r}
+# Conversion de la variable d'authenticité en valeur factorielle.
+
+billetsTrain$is_genuine <- as.factor(billetsTrain$is_genuine)
+billetsTest$is_genuine <- as.factor(billetsTest$is_genuine)
+```
+
+```{r}
+# Apprentissage par régression logistique sur toutes les variables
+fitControl <- trainControl(method="cv",number=10)
+
+m_lr <- train(is_genuine ~ ., 
+              data = billetsTrain,
+              method="glm",
+              control = list(maxit = 50),
+              trControl=fitControl)
+print(m_lr)
+```
+
+D'après la matrice de confusion, le taux de succès sur l'ensemble des variables est de 98%.
+
+```{r}
+summary(m_lr)
+```
+
+```{r}
+# Importance des variables
+varImp(m_lr)
+```
+
+La variable "diagonal" semble avoir très peu d'influence sur la variation des échantillons dans la prédiction.
+
+```{r}
+# Affichage du modèle obtenu
+print(m_lr$finalModel)
+```
+
+L'AIC, privilégié pour comparer la pertinence de différents modèles, s'élève ici à 14.
+
+```{r}
+#Méthode intégrée de sélection
+m_lrs <- train(is_genuine ~ ., data = billetsTrain, method="glm", control= list(maxit = 50), trControl = fitControl)
+
+# Performance sur l'échantillon test
+confusionMatrix(data = predict(m_lrs,newdata = billetsTest),reference = billetsTest$is_genuine, positive="FALSE")
+```
+
+L'accuracy s'élève ici à 98%.
+
+#### Modélisation par validation croisée sur les 3 variables les plus significatives
+
+Le modèle de régression logistique utilisé dans la partie précédente nous a permis de constater que 3 des 6 variables contribuaient plus largement à la prédiction des faux billets. Nous allons donc ici tester un modèle se basant uniquement sur ces 3 variables.
+
+```{r}
+# évaluation par rééchantillonnage
+fitControl <- trainControl(method="cv",number=10)
+m_lr <- train(is_genuine ~ margin_low+margin_up+length, data = billetsTrain,method="glm",control= list(maxit = 50),trControl=fitControl)
+print(m_lr)
+```
+
+D'après la matrice de confusion, le taux de succès sur les variables "margin_low', 'margin_up' et 'length' est de 99%.
+
+```{r}
+# Importance des variables
+varImp(m_lr)
+```
+
+La variable "margin low" semble avoir une influence particulièrement significative sur la variation des échantillons dans la prédiction.
+
+```{r}
+# Affichage du modèle obtenu
+print(m_lr$finalModel)
+```
+
+L'AIC s'élève ici à 8, ce qui confirmerait que le modèle ici choisi est plus adapté à la prédiction à partir de nos données.
+
+```{r}
+# Performance sur l'échantillon test
+print(confusionMatrix(data = predict(m_lr,newdata = billetsTest),reference = billetsTest$is_genuine, positive="FALSE"))
+```
+
+Malrgé la diminution du nombre de variables, le taux de succès est de 98%, tout comme la régression réalisée sur l'ensemble des variables. La simplification du modèle n'a donc pas entraîné une chute de l'accuracy.
+
+#### Prédiction des 5 billets à tester
+
+```{r}
+# Lecture des tableaux
+billets <- read.table("data/notes.csv",header = TRUE, sep = ",")
+billetsTest5 <- read.table("data/5_notes.csv",header=TRUE, sep=",")
+
+row.names(billetsTest5) <- billetsTest5$id
+billetsTest5$id <- NULL
+head(billetsTest5)
+```
+
+```{r}
+# Prédiction par régression logistique
+pred <- predict(m_lr,newdata=billetsTest5)
+table(pred)
+```
+
+```{r}
+# Jointure des lignes
+billets_new <- bind_rows(billets, billetsTest5)
+
+billets_new
+```
+
+```{r}
+# ACP
+res.pca.test=PCA(billets_new[,1:7], quali.sup = 1, ind.sup = 171:175, scale.unit=TRUE, graph=FALSE, axes=c(1,2))
+```
+
+```{r}
+# Représentation par ellipses des billets sur plan factoriel selon leur authenticité
+p <- fviz_pca_ind(res.pca.test, geom.ind = "point", pointsize = 1, habillage = 1, addEllipses=TRUE, ellipse.level=0.90)
+             
+p <- fviz_add(p, res.pca.test$ind.sup$coord, color = "black") + labs(title = "Positionnement des billets détectés") + theme(plot.title = element_text(color = '#3876C2', size=20, face='bold', hjust = 0.5), axis.title.x = element_text(color="black", size = 14, face = "bold", hjust = 0.5), axis.title.y = element_text(color = "black", size = 14, face = "bold", vjust = 0.5)) + ggsave("graphiques/graphique00_billets_detectes.jpg", width = 16, height = 9)
+
+p
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
